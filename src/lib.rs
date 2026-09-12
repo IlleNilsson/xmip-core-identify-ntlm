@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
-//! Library entry point for an Xmip component.
+//! Identify by ntlm: reads the user and domain of an NTLM type 3 message; a transport-layer
+//! identifier whose claim is passed.
 //!
-//! Replace this template documentation only after the repository responsibility,
-//! public contracts and dependency direction are accepted in the Xmip architecture.
+//! Declared and not yet written: `architecture.toml` carries the maturity. When it
+//! is, it implements `TransportIdentifier` (ADR-0050).
