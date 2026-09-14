@@ -4,8 +4,9 @@ Identify by ntlm: reads the user and domain of an NTLM type 3 message; a transpo
 [xmip-core-identify](https://github.com/IlleNilsson/xmip-core-identify).
 
 Declared and not yet written; `architecture.toml` carries the maturity. When
-it is written it implements `TransportIdentifier`, one mechanism at one gate (ADR-0050), and
-nothing goes sideways: it depends on its capability and on no sibling.
+it is written it implements `TransportIdentifier`, one mechanism at one gate (ADR-0050).
+What it may depend on is `repository-model.md` section 4 and ADR-0044: its
+capability, and no sibling.
 
 ## Toolchain
 
