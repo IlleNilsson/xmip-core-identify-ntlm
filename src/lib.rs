@@ -24,14 +24,23 @@
 //! http.header.authorization   NTLM <base64> or Negotiate <base64>   the property
 //! ntlm.domain                 the DomainName field                  evidence, where present
 //! ntlm.workstation            the Workstation field                 evidence, where present
+//! principal.user              the user within the domain            evidence, where a domain
 //! ntlm.authenticate           the type 3 message, base64            proof
 //! ```
+//!
+//! Where the message names a domain, the user and the domain together are a
+//! user principal name, written as `principal.user` in the capability's
+//! canonical form (ADR-0054); the claim stays the user. The target name rides
+//! inside the `NTLMv2` response, which this identifier does not open, so no
+//! `principal.service` is written.
 //!
 //! Only a pushed arrival carries a passed claim.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use identify::{IdentifyError, Presented, StreamArrival, TransportIdentifier};
+use identify::{
+    IdentifyError, Presented, StreamArrival, TransportIdentifier, UserPrincipalName, principal,
+};
 use xcore::{Arriving, Mechanism};
 
 /// The property read: the HTTP `Authorization` header.
@@ -177,12 +186,16 @@ impl TransportIdentifier for Ntlm {
         let Some(authenticate) = Authenticate::parse(&bytes)? else {
             return Ok(None);
         };
+        let principal = UserPrincipalName::of(&authenticate.user, &authenticate.domain);
         let mut claim = Presented::passed(self.mechanism(), authenticate.user);
         if !authenticate.domain.is_empty() {
             claim = claim.with_evidence(DOMAIN, authenticate.domain);
         }
         if !authenticate.workstation.is_empty() {
             claim = claim.with_evidence(WORKSTATION, authenticate.workstation);
+        }
+        if let Some(principal) = principal {
+            claim = claim.with_evidence(principal::USER, principal.to_string());
         }
         Ok(Some(claim.with_proof(AUTHENTICATE_PROOF, encoded)))
     }
@@ -255,6 +268,7 @@ mod tests {
             vec![
                 (DOMAIN.to_string(), "PARTNERX".to_string()),
                 (WORKSTATION.to_string(), "WS01".to_string()),
+                (principal::USER.to_string(), "jane@partnerx".to_string()),
             ]
         );
         let proof = claim.proof(AUTHENTICATE_PROOF).expect("proof");
@@ -274,6 +288,48 @@ mod tests {
         let properties = authorization("Negotiate", &[0x60, 0x06, 0x06, 0x04, 0x2b, 0x06]);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         assert!(Ntlm.identify(&arrival).expect("read").is_none());
+    }
+
+    #[test]
+    fn the_user_within_the_domain_is_written_as_a_principal_name_in_canonical_form() {
+        let stream = stream();
+        let properties = authorization("NTLM", &authenticate("Jane", "Partner-X.Example", ""));
+        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+
+        let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
+
+        assert_eq!(claim.value, "Jane", "the value stays the user");
+        assert_eq!(
+            claim.evidence,
+            vec![
+                (DOMAIN.to_string(), "Partner-X.Example".to_string()),
+                (
+                    principal::USER.to_string(),
+                    "Jane@partner-x.example".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_user_without_a_domain_or_within_no_real_one_gains_no_principal_evidence() {
+        let stream = stream();
+
+        for domain in ["", "not a domain"] {
+            let properties = authorization("NTLM", &authenticate("jane", domain, "WS01"));
+            let arrival =
+                StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+
+            let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
+
+            assert!(
+                claim
+                    .evidence
+                    .iter()
+                    .all(|(name, _)| name != principal::USER && name != principal::SERVICE),
+                "{domain}"
+            );
+        }
     }
 
     #[test]
