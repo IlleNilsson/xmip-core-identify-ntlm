@@ -29,7 +29,16 @@
 //! ntlm.target.untrusted       true                                  evidence, where flagged
 //! principal.service           the target, canonical                 evidence, where trusted
 //! ntlm.authenticate           the type 3 message, base64            proof
+//! ntlm.negotiate              the type 1 message, base64            proof, where the transport
+//! ntlm.challenge              the type 2 message, base64            proof, where the transport
 //! ```
+//!
+//! The last two are not the client's to send again: they are the first two
+//! legs of this connection's handshake, which only the transport saw. A
+//! transport that keeps them writes them as the properties `ntlm.negotiate`
+//! and `ntlm.challenge`, and they ride on as proofs of the same names so the
+//! second gate can check the MIC the client computed over all three messages
+//! ([MS-NLMP] 3.1.5.1.2). Where the transport writes neither, neither rides.
 //!
 //! Where the message names a domain, the user and the domain together are a
 //! user principal name, written as `principal.user` in the capability's
@@ -62,6 +71,11 @@ pub const DOMAIN: &str = "ntlm.domain";
 pub const WORKSTATION: &str = "ntlm.workstation";
 /// The proof name the base64 message rides under.
 pub const AUTHENTICATE_PROOF: &str = "ntlm.authenticate";
+/// The property a transport writes the handshake's type 1 message under, and
+/// the proof it rides on as.
+pub const NEGOTIATE_PROOF: &str = "ntlm.negotiate";
+/// The same for the type 2 message the node answered with.
+pub const CHALLENGE_PROOF: &str = "ntlm.challenge";
 /// The evidence name carrying the target name, as the client wrote it.
 pub const TARGET: &str = "ntlm.target";
 /// The evidence name saying the client took the target from an untrusted source.
@@ -248,6 +262,11 @@ impl TransportIdentifier for Ntlm {
             }
             if let Some(service) = read.supplied_target().and_then(ServicePrincipalName::parse) {
                 claim = claim.with_evidence(principal::SERVICE, service.to_string());
+            }
+        }
+        for leg in [NEGOTIATE_PROOF, CHALLENGE_PROOF] {
+            if let Some(message) = arrival.property(leg) {
+                claim = claim.with_proof(leg, message.trim());
             }
         }
         Ok(Some(claim.with_proof(AUTHENTICATE_PROOF, encoded)))
@@ -472,6 +491,24 @@ mod tests {
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let failure = Ntlm.identify(&arrival).expect_err("astray");
         assert!(failure.message.contains("NtChallengeResponse"), "{failure}");
+    }
+
+    #[test]
+    fn the_handshakes_first_two_legs_ride_on_as_proofs_where_the_transport_kept_them() {
+        let stream = stream();
+        let mut properties = authorization("NTLM", &authenticate("jane", "PARTNERX", "WS01"));
+        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
+        assert_eq!(claim.proof(NEGOTIATE_PROOF), None);
+
+        properties.push((NEGOTIATE_PROOF.to_string(), "TlRMTVNTUAAB".to_string()));
+        properties.push((CHALLENGE_PROOF.to_string(), " TlRMTVNTUAAC ".to_string()));
+        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
+
+        assert_eq!(claim.proof(NEGOTIATE_PROOF), Some("TlRMTVNTUAAB"));
+        assert_eq!(claim.proof(CHALLENGE_PROOF), Some("TlRMTVNTUAAC"));
+        assert!(claim.proof(AUTHENTICATE_PROOF).is_some());
     }
 
     #[test]
