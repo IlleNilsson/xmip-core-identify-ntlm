@@ -56,6 +56,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use identify::authorization::{self, AUTHORIZATION};
 use identify::ntlm::ClientChallenge;
 use identify::{
     IdentifyError, Presented, ServicePrincipalName, StreamArrival, TransportIdentifier,
@@ -63,8 +64,6 @@ use identify::{
 };
 use xcore::{Arriving, Mechanism};
 
-/// The property read: the HTTP `Authorization` header.
-pub const AUTHORIZATION: &str = "http.header.authorization";
 /// The evidence name carrying the domain.
 pub const DOMAIN: &str = "ntlm.domain";
 /// The evidence name carrying the workstation.
@@ -219,13 +218,10 @@ impl TransportIdentifier for Ntlm {
         if arrival.arriving() != Arriving::Pushed {
             return Ok(None);
         }
-        let Some((scheme, encoded)) = arrival
-            .property(AUTHORIZATION)
-            .and_then(|raw| raw.trim().split_once(char::is_whitespace))
+        let Some((scheme, encoded)) = arrival.property(AUTHORIZATION).map(authorization::scheme)
         else {
             return Ok(None);
         };
-        let encoded = encoded.trim();
         let negotiate = scheme.eq_ignore_ascii_case("negotiate");
         if !negotiate && !scheme.eq_ignore_ascii_case("ntlm") {
             return Ok(None);
