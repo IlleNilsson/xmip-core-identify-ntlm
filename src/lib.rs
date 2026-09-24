@@ -11,7 +11,9 @@
 //! workstation ride beside it as evidence, and the whole message rides as
 //! proof for `authenticate/ntlm` to check the response against the stored
 //! hash. Nothing here checks it. A type 1 claims nothing yet and presents
-//! nothing; a type 2 is the server's and cannot be a credential.
+//! nothing; a type 2 is the server's and cannot be a credential. The message
+//! is read by the capability's `identify::ntlm::Authenticate`, the one reader
+//! `authenticate/ntlm` reads the same bytes with.
 //!
 //! RFC 4559 carries the message as `Authorization: NTLM <base64>`, and the
 //! `Negotiate` scheme carries the same bytes when the client chose NTLM
@@ -53,14 +55,12 @@
 //! covers the target too; here it is read and not believed.
 //!
 //! Only a pushed arrival carries a passed claim.
-
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use identify::authorization::{self, AUTHORIZATION};
-use identify::ntlm::ClientChallenge;
+use identify::evidence;
+use identify::ntlm::{Authenticate, SIGNATURE};
 use identify::{
     IdentifyError, Presented, ServicePrincipalName, StreamArrival, TransportIdentifier,
-    UserPrincipalName, principal,
+    UserPrincipalName,
 };
 use xcore::{Arriving, Mechanism};
 
@@ -68,144 +68,10 @@ use xcore::{Arriving, Mechanism};
 pub const DOMAIN: &str = "ntlm.domain";
 /// The evidence name carrying the workstation.
 pub const WORKSTATION: &str = "ntlm.workstation";
-/// The proof name the base64 message rides under.
-pub const AUTHENTICATE_PROOF: &str = "ntlm.authenticate";
-/// The property a transport writes the handshake's type 1 message under, and
-/// the proof it rides on as.
-pub const NEGOTIATE_PROOF: &str = "ntlm.negotiate";
-/// The same for the type 2 message the node answered with.
-pub const CHALLENGE_PROOF: &str = "ntlm.challenge";
 /// The evidence name carrying the target name, as the client wrote it.
 pub const TARGET: &str = "ntlm.target";
 /// The evidence name saying the client took the target from an untrusted source.
 pub const TARGET_UNTRUSTED: &str = "ntlm.target.untrusted";
-
-const SIGNATURE: &[u8] = b"NTLMSSP\0";
-const NEGOTIATE_UNICODE: u32 = 0x0000_0001;
-const DOMAIN_FIELDS: usize = 28;
-const USER_FIELDS: usize = 36;
-const WORKSTATION_FIELDS: usize = 44;
-const FLAGS: usize = 60;
-const NT_RESPONSE_FIELDS: usize = 20;
-const PROOF: usize = 16;
-
-/// The names an AUTHENTICATE message carries in the clear.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Authenticate {
-    pub user: String,
-    pub domain: String,
-    pub workstation: String,
-}
-
-impl Authenticate {
-    /// Read the names out of an NTLMSSP message.
-    ///
-    /// `None` for a NEGOTIATE, which claims nothing yet.
-    ///
-    /// # Errors
-    ///
-    /// Where the bytes are not an NTLMSSP message, are a CHALLENGE, are
-    /// truncated, or name no user.
-    pub fn parse(bytes: &[u8]) -> Result<Option<Self>, IdentifyError> {
-        if !bytes.starts_with(SIGNATURE) || bytes.len() < 12 {
-            return Err(IdentifyError::new(
-                "the NTLM message has no NTLMSSP signature",
-            ));
-        }
-        match u32_at(bytes, 8) {
-            Some(1) => return Ok(None),
-            Some(2) => {
-                return Err(IdentifyError::new(
-                    "the NTLM message is a CHALLENGE: the server's, not a credential",
-                ));
-            }
-            Some(3) => {}
-            _ => return Err(IdentifyError::new("the NTLM message type is not 1, 2 or 3")),
-        }
-        let Some(flags) = u32_at(bytes, FLAGS) else {
-            return Err(IdentifyError::new(
-                "the NTLM AUTHENTICATE message is truncated before its flags",
-            ));
-        };
-        let unicode = flags & NEGOTIATE_UNICODE != 0;
-
-        let user = field(bytes, USER_FIELDS, unicode, "UserName")?;
-        if user.is_empty() {
-            return Err(IdentifyError::new(
-                "the NTLM AUTHENTICATE message names no user",
-            ));
-        }
-        Ok(Some(Self {
-            user,
-            domain: field(bytes, DOMAIN_FIELDS, unicode, "DomainName")?,
-            workstation: field(bytes, WORKSTATION_FIELDS, unicode, "Workstation")?,
-        }))
-    }
-}
-
-fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    bytes
-        .get(at..at + 2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    bytes
-        .get(at..at + 4)
-        .map(|quad| u32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]))
-}
-
-/// One `Len, MaxLen, BufferOffset` field, and the text it points at.
-fn field(bytes: &[u8], at: usize, unicode: bool, name: &str) -> Result<String, IdentifyError> {
-    let (Some(length), Some(offset)) = (u16_at(bytes, at), u32_at(bytes, at + 4)) else {
-        return Err(IdentifyError::new(format!(
-            "the NTLM AUTHENTICATE message is truncated before its {name} field"
-        )));
-    };
-    let (length, offset) = (usize::from(length), offset as usize);
-    let Some(payload) = bytes.get(offset..offset + length) else {
-        return Err(IdentifyError::new(format!(
-            "the NTLM AUTHENTICATE message's {name} points outside the message"
-        )));
-    };
-
-    if unicode {
-        let units: Vec<u16> = payload
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes(*pair))
-            .collect();
-        String::from_utf16(&units)
-            .map_err(|_| IdentifyError::new(format!("the NTLM {name} is not UTF-16")))
-    } else {
-        Ok(payload.iter().map(|byte| char::from(*byte)).collect())
-    }
-}
-
-/// The client's half of the NT response, where the message carries an
-/// `NTLMv2` one: what follows the sixteen bytes of proof.
-fn client_challenge(bytes: &[u8]) -> Result<Option<ClientChallenge>, IdentifyError> {
-    let (Some(length), Some(offset)) = (
-        u16_at(bytes, NT_RESPONSE_FIELDS),
-        u32_at(bytes, NT_RESPONSE_FIELDS + 4),
-    ) else {
-        return Ok(None);
-    };
-    let (length, offset) = (usize::from(length), offset as usize);
-
-    if length <= PROOF {
-        return Ok(None);
-    }
-
-    let Some(response) = bytes.get(offset..offset.saturating_add(length)) else {
-        return Err(IdentifyError::new(
-            "the NTLM AUTHENTICATE message's NtChallengeResponse points outside the message",
-        ));
-    };
-
-    ClientChallenge::read(&response[PROOF..])
-}
 
 /// Reads the names out of the AUTHENTICATE message the client sent.
 #[derive(Clone, Copy, Debug, Default)]
@@ -229,8 +95,7 @@ impl TransportIdentifier for Ntlm {
             return Ok(None);
         }
 
-        let bytes = STANDARD
-            .decode(encoded)
+        let bytes = codec::base64::decode(encoded)
             .map_err(|_| IdentifyError::new("the NTLM message is not base64"))?;
         if negotiate && !bytes.starts_with(SIGNATURE) {
             return Ok(None);
@@ -239,6 +104,7 @@ impl TransportIdentifier for Ntlm {
         let Some(authenticate) = Authenticate::parse(&bytes)? else {
             return Ok(None);
         };
+        let challenge = authenticate.client_challenge()?;
         let principal = UserPrincipalName::of(&authenticate.user, &authenticate.domain);
         let mut claim = Presented::passed(self.mechanism(), authenticate.user);
         if !authenticate.domain.is_empty() {
@@ -248,9 +114,9 @@ impl TransportIdentifier for Ntlm {
             claim = claim.with_evidence(WORKSTATION, authenticate.workstation);
         }
         if let Some(principal) = principal {
-            claim = claim.with_evidence(principal::USER, principal.to_string());
+            claim = claim.with_evidence(evidence::PRINCIPAL_USER, principal.to_string());
         }
-        if let Some(read) = client_challenge(&bytes)?
+        if let Some(read) = challenge
             && let Some(name) = read.target.as_deref()
         {
             claim = claim.with_evidence(TARGET, name);
@@ -259,38 +125,34 @@ impl TransportIdentifier for Ntlm {
                 claim = claim.with_evidence(TARGET_UNTRUSTED, "true");
             }
             if let Some(service) = read.supplied_target().and_then(ServicePrincipalName::parse) {
-                claim = claim.with_evidence(principal::SERVICE, service.to_string());
+                claim = claim.with_evidence(evidence::PRINCIPAL_SERVICE, service.to_string());
             }
         }
-        for leg in [NEGOTIATE_PROOF, CHALLENGE_PROOF] {
+        for leg in [evidence::NTLM_NEGOTIATE, evidence::NTLM_CHALLENGE] {
             if let Some(message) = arrival.property(leg) {
                 claim = claim.with_proof(leg, message.trim());
             }
         }
-        Ok(Some(claim.with_proof(AUTHENTICATE_PROOF, encoded)))
+        Ok(Some(claim.with_proof(evidence::NTLM_AUTHENTICATE, encoded)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use identify::ntlm::fixture;
     use stream::Stream;
     use xcore::{Established, Layer, StreamId};
 
-    fn utf16(text: &str) -> Vec<u8> {
-        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
-    }
-
-    /// An AUTHENTICATE message with the three names, Unicode, and empty
-    /// responses: the shape MS-NLMP 2.2.1.3 gives it.
+    /// An AUTHENTICATE message with the three names and no NT response.
     fn authenticate(user: &str, domain: &str, workstation: &str) -> Vec<u8> {
-        authenticate_answering(user, domain, workstation, Vec::new())
+        authenticate_answering(user, domain, workstation, &[])
     }
 
     /// An `NTLMv2` response: sixteen bytes of proof, then the client's blob.
     fn answering(target: Option<&str>, flags: u32) -> Vec<u8> {
-        let mut response = vec![0xAB; PROOF];
-        response.extend(identify::ntlm::blob_for(1_800_000_000, target, flags));
+        let mut response = vec![0xAB; 16];
+        response.extend(fixture::blob(1_800_000_000, target, flags));
         response
     }
 
@@ -299,32 +161,9 @@ mod tests {
         user: &str,
         domain: &str,
         workstation: &str,
-        nt_response: Vec<u8>,
+        nt_response: &[u8],
     ) -> Vec<u8> {
-        let mut message = Vec::new();
-        message.extend_from_slice(SIGNATURE);
-        message.extend_from_slice(&3u32.to_le_bytes());
-        let payloads = [
-            Vec::new(),
-            nt_response,
-            utf16(domain),
-            utf16(user),
-            utf16(workstation),
-            Vec::new(),
-        ];
-        let mut offset = 64u32;
-        for payload in &payloads {
-            let length = u16::try_from(payload.len()).expect("short");
-            message.extend_from_slice(&length.to_le_bytes());
-            message.extend_from_slice(&length.to_le_bytes());
-            message.extend_from_slice(&offset.to_le_bytes());
-            offset += u32::from(length);
-        }
-        message.extend_from_slice(&NEGOTIATE_UNICODE.to_le_bytes());
-        for payload in &payloads {
-            message.extend_from_slice(payload);
-        }
-        message
+        fixture::authenticate(user, domain, workstation, nt_response, 0, &[])
     }
 
     fn stream() -> Stream {
@@ -334,7 +173,7 @@ mod tests {
     fn authorization(scheme: &str, bytes: &[u8]) -> Vec<(String, String)> {
         vec![(
             AUTHORIZATION.to_string(),
-            format!("{scheme} {}", STANDARD.encode(bytes)),
+            format!("{scheme} {}", codec::base64::encode(bytes)),
         )]
     }
 
@@ -355,10 +194,13 @@ mod tests {
             vec![
                 (DOMAIN.to_string(), "PARTNERX".to_string()),
                 (WORKSTATION.to_string(), "WS01".to_string()),
-                (principal::USER.to_string(), "jane@partnerx".to_string()),
+                (
+                    evidence::PRINCIPAL_USER.to_string(),
+                    "jane@partnerx".to_string()
+                ),
             ]
         );
-        let proof = claim.proof(AUTHENTICATE_PROOF).expect("proof");
+        let proof = claim.proof(evidence::NTLM_AUTHENTICATE).expect("proof");
         assert_eq!(properties[0].1, format!("NTLM {proof}"));
     }
 
@@ -391,7 +233,7 @@ mod tests {
             vec![
                 (DOMAIN.to_string(), "Partner-X.Example".to_string()),
                 (
-                    principal::USER.to_string(),
+                    evidence::PRINCIPAL_USER.to_string(),
                     "Jane@partner-x.example".to_string()
                 ),
             ]
@@ -413,7 +255,8 @@ mod tests {
                 claim
                     .evidence
                     .iter()
-                    .all(|(name, _)| name != principal::USER && name != principal::SERVICE),
+                    .all(|(name, _)| name != evidence::PRINCIPAL_USER
+                        && name != evidence::PRINCIPAL_SERVICE),
                 "{domain}"
             );
         }
@@ -427,7 +270,7 @@ mod tests {
             "jane",
             "PARTNERX",
             "WS01",
-            answering(Some("HTTP/Xmip.Example"), 0x2),
+            &answering(Some("HTTP/Xmip.Example"), 0x2),
         );
         let properties = authorization("NTLM", &bytes);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
@@ -443,8 +286,8 @@ mod tests {
 
         assert_eq!(claim.value, "jane");
         assert_eq!(said(TARGET), Some("HTTP/Xmip.Example"));
-        assert_eq!(said(principal::SERVICE), Some("HTTP/xmip.example"));
-        assert_eq!(said(principal::USER), Some("jane@partnerx"));
+        assert_eq!(said(evidence::PRINCIPAL_SERVICE), Some("HTTP/xmip.example"));
+        assert_eq!(said(evidence::PRINCIPAL_USER), Some("jane@partnerx"));
         assert_eq!(said(TARGET_UNTRUSTED), None);
     }
 
@@ -455,7 +298,7 @@ mod tests {
             "jane",
             "PARTNERX",
             "WS01",
-            answering(Some("HTTP/xmip.example"), 0x2 | 0x4),
+            &answering(Some("HTTP/xmip.example"), 0x2 | 0x4),
         );
         let properties = authorization("NTLM", &bytes);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
@@ -469,22 +312,22 @@ mod tests {
 
         assert!(names.contains(&TARGET), "{names:?}");
         assert!(names.contains(&TARGET_UNTRUSTED), "{names:?}");
-        assert!(!names.contains(&principal::SERVICE), "{names:?}");
+        assert!(!names.contains(&evidence::PRINCIPAL_SERVICE), "{names:?}");
     }
 
     #[test]
     fn an_ntlmv1_response_names_no_target_and_one_outside_the_message_is_an_error() {
         let stream = stream();
-        let older = authenticate_answering("jane", "PARTNERX", "WS01", vec![0x5A; 24]);
+        let older = authenticate_answering("jane", "PARTNERX", "WS01", &[0x5A; 24]);
         let properties = authorization("NTLM", &older);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         assert!(claim.evidence.iter().all(|(name, _)| name != TARGET));
 
         // The names read whole; only the NT response is made to point away.
-        let mut astray = authenticate_answering("jane", "PARTNERX", "WS01", answering(None, 0));
-        astray[NT_RESPONSE_FIELDS + 4..NT_RESPONSE_FIELDS + 8]
-            .copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
+        let mut astray = authenticate_answering("jane", "PARTNERX", "WS01", &answering(None, 0));
+        // The NtChallengeResponse's BufferOffset, at 24 ([MS-NLMP] 2.2.1.3).
+        astray[24..28].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
         let properties = authorization("NTLM", &astray);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let failure = Ntlm.identify(&arrival).expect_err("astray");
@@ -497,16 +340,22 @@ mod tests {
         let mut properties = authorization("NTLM", &authenticate("jane", "PARTNERX", "WS01"));
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
-        assert_eq!(claim.proof(NEGOTIATE_PROOF), None);
+        assert_eq!(claim.proof(evidence::NTLM_NEGOTIATE), None);
 
-        properties.push((NEGOTIATE_PROOF.to_string(), "TlRMTVNTUAAB".to_string()));
-        properties.push((CHALLENGE_PROOF.to_string(), " TlRMTVNTUAAC ".to_string()));
+        properties.push((
+            evidence::NTLM_NEGOTIATE.to_string(),
+            "TlRMTVNTUAAB".to_string(),
+        ));
+        properties.push((
+            evidence::NTLM_CHALLENGE.to_string(),
+            " TlRMTVNTUAAC ".to_string(),
+        ));
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
 
-        assert_eq!(claim.proof(NEGOTIATE_PROOF), Some("TlRMTVNTUAAB"));
-        assert_eq!(claim.proof(CHALLENGE_PROOF), Some("TlRMTVNTUAAC"));
-        assert!(claim.proof(AUTHENTICATE_PROOF).is_some());
+        assert_eq!(claim.proof(evidence::NTLM_NEGOTIATE), Some("TlRMTVNTUAAB"));
+        assert_eq!(claim.proof(evidence::NTLM_CHALLENGE), Some("TlRMTVNTUAAC"));
+        assert!(claim.proof(evidence::NTLM_AUTHENTICATE).is_some());
     }
 
     #[test]
