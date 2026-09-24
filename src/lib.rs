@@ -11,9 +11,10 @@
 //! workstation ride beside it as evidence, and the whole message rides as
 //! proof for `authenticate/ntlm` to check the response against the stored
 //! hash. Nothing here checks it. A type 1 claims nothing yet and presents
-//! nothing; a type 2 is the server's and cannot be a credential. The message
-//! is read by the capability's `identify::ntlm::Authenticate`, the one reader
-//! `authenticate/ntlm` reads the same bytes with.
+//! nothing; a type 2 is the server's and cannot be a credential, and a type
+//! 3 that names no user claims no one. The message is read by
+//! `xmip-core-library-ntlm`, the one layout `authenticate/ntlm` reads the
+//! same bytes with.
 //!
 //! RFC 4559 carries the message as `Authorization: NTLM <base64>`, and the
 //! `Negotiate` scheme carries the same bytes when the client chose NTLM
@@ -46,8 +47,8 @@
 //! user principal name, written as `principal.user` in the capability's
 //! canonical form (ADR-0054); the claim stays the user. The service the
 //! client meant to reach rides inside the `NTLMv2` response, among its
-//! attribute and value pairs, read by the capability's
-//! `identify::ntlm::ClientChallenge` because both gates need it: it is
+//! attribute and value pairs, read by the library's `ClientChallenge`
+//! because both gates need it: it is
 //! written as the client wrote it, and as `principal.service` where it is a
 //! service principal name and the client does not flag it as taken from an
 //! untrusted source, which [MS-NLMP] 3.2.5.1.2 has a server treat as no name.
@@ -55,13 +56,14 @@
 //! covers the target too; here it is read and not believed.
 //!
 //! Only a pushed arrival carries a passed claim.
-use identify::authorization::{self, AUTHORIZATION};
+use context::property::{self, HTTP_AUTHORIZATION};
+use identify::authorization;
 use identify::evidence;
-use identify::ntlm::{Authenticate, SIGNATURE};
 use identify::{
     IdentifyError, Presented, ServicePrincipalName, StreamArrival, TransportIdentifier,
     UserPrincipalName,
 };
+use ntlm::{Authenticate, MessageType, SIGNATURE};
 use xcore::{Arriving, Mechanism};
 
 /// The evidence name carrying the domain.
@@ -86,7 +88,9 @@ impl TransportIdentifier for Ntlm {
         if arrival.arriving() != Arriving::Pushed {
             return Ok(None);
         }
-        let Some((scheme, encoded)) = arrival.property(AUTHORIZATION).map(authorization::scheme)
+        let Some((scheme, encoded)) = arrival
+            .property(HTTP_AUTHORIZATION)
+            .map(authorization::scheme)
         else {
             return Ok(None);
         };
@@ -101,9 +105,21 @@ impl TransportIdentifier for Ntlm {
             return Ok(None);
         }
 
-        let Some(authenticate) = Authenticate::parse(&bytes)? else {
-            return Ok(None);
-        };
+        match MessageType::of(&bytes)? {
+            MessageType::Negotiate => return Ok(None),
+            MessageType::Challenge => {
+                return Err(IdentifyError::new(
+                    "the NTLM message is a CHALLENGE: the server's, not a credential",
+                ));
+            }
+            MessageType::Authenticate => {}
+        }
+        let authenticate = Authenticate::parse(&bytes)?;
+        if authenticate.user.is_empty() {
+            return Err(IdentifyError::new(
+                "the NTLM AUTHENTICATE message names no user",
+            ));
+        }
         let challenge = authenticate.client_challenge()?;
         let principal = UserPrincipalName::of(&authenticate.user, &authenticate.domain);
         let mut claim = Presented::passed(self.mechanism(), authenticate.user);
@@ -128,7 +144,7 @@ impl TransportIdentifier for Ntlm {
                 claim = claim.with_evidence(evidence::PRINCIPAL_SERVICE, service.to_string());
             }
         }
-        for leg in [evidence::NTLM_NEGOTIATE, evidence::NTLM_CHALLENGE] {
+        for leg in [property::NTLM_NEGOTIATE, property::NTLM_CHALLENGE] {
             if let Some(message) = arrival.property(leg) {
                 claim = claim.with_proof(leg, message.trim());
             }
@@ -140,7 +156,8 @@ impl TransportIdentifier for Ntlm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use identify::ntlm::fixture;
+    use ntlm::flags::NEGOTIATE_UNICODE;
+    use ntlm::{Challenge, ClientChallenge};
     use stream::Stream;
     use xcore::{Established, Layer, StreamId};
 
@@ -150,9 +167,15 @@ mod tests {
     }
 
     /// An `NTLMv2` response: sixteen bytes of proof, then the client's blob.
-    fn answering(target: Option<&str>, flags: u32) -> Vec<u8> {
+    fn answering(target: Option<&str>, untrusted: bool) -> Vec<u8> {
+        let challenge = ClientChallenge {
+            target: target.map(str::to_string),
+            untrusted,
+            integrity: true,
+            ..ClientChallenge::at(1_800_000_000)
+        };
         let mut response = vec![0xAB; 16];
-        response.extend(fixture::blob(1_800_000_000, target, flags));
+        response.extend(challenge.to_blob([0x22; 8]));
         response
     }
 
@@ -163,7 +186,16 @@ mod tests {
         workstation: &str,
         nt_response: &[u8],
     ) -> Vec<u8> {
-        fixture::authenticate(user, domain, workstation, nt_response, 0, &[])
+        Authenticate {
+            user: user.to_string(),
+            domain: domain.to_string(),
+            workstation: workstation.to_string(),
+            flags: NEGOTIATE_UNICODE,
+            lm_response: vec![0; 24],
+            nt_response: nt_response.to_vec(),
+            session_key: Vec::new(),
+        }
+        .to_bytes()
     }
 
     fn stream() -> Stream {
@@ -172,7 +204,7 @@ mod tests {
 
     fn authorization(scheme: &str, bytes: &[u8]) -> Vec<(String, String)> {
         vec![(
-            AUTHORIZATION.to_string(),
+            HTTP_AUTHORIZATION.to_string(),
             format!("{scheme} {}", codec::base64::encode(bytes)),
         )]
     }
@@ -270,7 +302,7 @@ mod tests {
             "jane",
             "PARTNERX",
             "WS01",
-            &answering(Some("HTTP/Xmip.Example"), 0x2),
+            &answering(Some("HTTP/Xmip.Example"), false),
         );
         let properties = authorization("NTLM", &bytes);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
@@ -298,7 +330,7 @@ mod tests {
             "jane",
             "PARTNERX",
             "WS01",
-            &answering(Some("HTTP/xmip.example"), 0x2 | 0x4),
+            &answering(Some("HTTP/xmip.example"), true),
         );
         let properties = authorization("NTLM", &bytes);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
@@ -325,7 +357,8 @@ mod tests {
         assert!(claim.evidence.iter().all(|(name, _)| name != TARGET));
 
         // The names read whole; only the NT response is made to point away.
-        let mut astray = authenticate_answering("jane", "PARTNERX", "WS01", &answering(None, 0));
+        let mut astray =
+            authenticate_answering("jane", "PARTNERX", "WS01", &answering(None, false));
         // The NtChallengeResponse's BufferOffset, at 24 ([MS-NLMP] 2.2.1.3).
         astray[24..28].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
         let properties = authorization("NTLM", &astray);
@@ -340,21 +373,21 @@ mod tests {
         let mut properties = authorization("NTLM", &authenticate("jane", "PARTNERX", "WS01"));
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
-        assert_eq!(claim.proof(evidence::NTLM_NEGOTIATE), None);
+        assert_eq!(claim.proof(property::NTLM_NEGOTIATE), None);
 
         properties.push((
-            evidence::NTLM_NEGOTIATE.to_string(),
+            property::NTLM_NEGOTIATE.to_string(),
             "TlRMTVNTUAAB".to_string(),
         ));
         properties.push((
-            evidence::NTLM_CHALLENGE.to_string(),
+            property::NTLM_CHALLENGE.to_string(),
             " TlRMTVNTUAAC ".to_string(),
         ));
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
 
-        assert_eq!(claim.proof(evidence::NTLM_NEGOTIATE), Some("TlRMTVNTUAAB"));
-        assert_eq!(claim.proof(evidence::NTLM_CHALLENGE), Some("TlRMTVNTUAAC"));
+        assert_eq!(claim.proof(property::NTLM_NEGOTIATE), Some("TlRMTVNTUAAB"));
+        assert_eq!(claim.proof(property::NTLM_CHALLENGE), Some("TlRMTVNTUAAC"));
         assert!(claim.proof(evidence::NTLM_AUTHENTICATE).is_some());
     }
 
@@ -368,9 +401,24 @@ mod tests {
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         assert!(Ntlm.identify(&arrival).expect("read").is_none());
 
-        let properties = [(AUTHORIZATION.to_string(), "Bearer abc".to_string())];
+        let properties = [(HTTP_AUTHORIZATION.to_string(), "Bearer abc".to_string())];
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         assert!(Ntlm.identify(&arrival).expect("read").is_none());
+    }
+
+    #[test]
+    fn a_type_2_is_the_servers_and_a_type_3_naming_no_user_claims_no_one() {
+        let stream = stream();
+        let refused = |bytes: &[u8]| {
+            let properties = authorization("NTLM", bytes);
+            let arrival =
+                StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+            Ntlm.identify(&arrival).expect_err("refused").message
+        };
+
+        let challenge = Challenge::new(NEGOTIATE_UNICODE, [7; 8]).to_bytes();
+        assert!(refused(&challenge).contains("CHALLENGE"));
+        assert!(refused(&authenticate("", "CORP", "")).contains("names no user"));
     }
 
     #[test]
