@@ -18,8 +18,8 @@ path = "src/lib.rs"
 # (repository-model.md). The mechanism is xmip-core's.
 identify = { package = "xmip-core-identify", git = "https://github.com/IlleNilsson/xmip-core-identify", branch = "main" }
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
-# RFC 4559 carries the message as standard base64; the estate's base64 crate.
-base64 = "0.22"
+# The estate's base 64 (RFC 4648), which the credential travels in.
+codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 
 [dev-dependencies]
 # The Stream an arrival is built over, for the tests only.
