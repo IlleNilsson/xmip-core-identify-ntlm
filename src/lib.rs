@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn a_type_3_is_presented_by_its_user_with_domain_and_workstation_beside() {
         let stream = stream();
-        let properties = authorization("NTLM", &authenticate("jane", "PARTNERX", "WS01"));
+        let properties = authorization("NTLM", &authenticate("jane", "PARTYX", "WS01"));
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
 
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
@@ -224,11 +224,11 @@ mod tests {
         assert_eq!(
             claim.evidence,
             vec![
-                (DOMAIN.to_string(), "PARTNERX".to_string()),
+                (DOMAIN.to_string(), "PARTYX".to_string()),
                 (WORKSTATION.to_string(), "WS01".to_string()),
                 (
                     evidence::PRINCIPAL_USER.to_string(),
-                    "jane@partnerx".to_string()
+                    "jane@partyx".to_string()
                 ),
             ]
         );
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn the_user_within_the_domain_is_written_as_a_principal_name_in_canonical_form() {
         let stream = stream();
-        let properties = authorization("NTLM", &authenticate("Jane", "Partner-X.Example", ""));
+        let properties = authorization("NTLM", &authenticate("Jane", "Party-X.Example", ""));
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
 
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
@@ -263,10 +263,10 @@ mod tests {
         assert_eq!(
             claim.evidence,
             vec![
-                (DOMAIN.to_string(), "Partner-X.Example".to_string()),
+                (DOMAIN.to_string(), "Party-X.Example".to_string()),
                 (
                     evidence::PRINCIPAL_USER.to_string(),
-                    "Jane@partner-x.example".to_string()
+                    "Jane@party-x.example".to_string()
                 ),
             ]
         );
@@ -300,7 +300,7 @@ mod tests {
         let stream = stream();
         let bytes = authenticate_answering(
             "jane",
-            "PARTNERX",
+            "PARTYX",
             "WS01",
             &answering(Some("HTTP/Xmip.Example"), false),
         );
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(claim.value, "jane");
         assert_eq!(said(TARGET), Some("HTTP/Xmip.Example"));
         assert_eq!(said(evidence::PRINCIPAL_SERVICE), Some("HTTP/xmip.example"));
-        assert_eq!(said(evidence::PRINCIPAL_USER), Some("jane@partnerx"));
+        assert_eq!(said(evidence::PRINCIPAL_USER), Some("jane@partyx"));
         assert_eq!(said(TARGET_UNTRUSTED), None);
     }
 
@@ -328,7 +328,7 @@ mod tests {
         let stream = stream();
         let bytes = authenticate_answering(
             "jane",
-            "PARTNERX",
+            "PARTYX",
             "WS01",
             &answering(Some("HTTP/xmip.example"), true),
         );
@@ -350,15 +350,14 @@ mod tests {
     #[test]
     fn an_ntlmv1_response_names_no_target_and_one_outside_the_message_is_an_error() {
         let stream = stream();
-        let older = authenticate_answering("jane", "PARTNERX", "WS01", &[0x5A; 24]);
+        let older = authenticate_answering("jane", "PARTYX", "WS01", &[0x5A; 24]);
         let properties = authorization("NTLM", &older);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         assert!(claim.evidence.iter().all(|(name, _)| name != TARGET));
 
         // The names read whole; only the NT response is made to point away.
-        let mut astray =
-            authenticate_answering("jane", "PARTNERX", "WS01", &answering(None, false));
+        let mut astray = authenticate_answering("jane", "PARTYX", "WS01", &answering(None, false));
         // The NtChallengeResponse's BufferOffset, at 24 ([MS-NLMP] 2.2.1.3).
         astray[24..28].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
         let properties = authorization("NTLM", &astray);
@@ -370,7 +369,7 @@ mod tests {
     #[test]
     fn the_handshakes_first_two_legs_ride_on_as_proofs_where_the_transport_kept_them() {
         let stream = stream();
-        let mut properties = authorization("NTLM", &authenticate("jane", "PARTNERX", "WS01"));
+        let mut properties = authorization("NTLM", &authenticate("jane", "PARTYX", "WS01"));
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         assert_eq!(claim.proof(property::NTLM_NEGOTIATE), None);
@@ -424,7 +423,7 @@ mod tests {
     #[test]
     fn a_truncated_type_3_is_an_error_naming_where_it_stopped() {
         let stream = stream();
-        let properties = authorization("NTLM", &authenticate("jane", "PARTNERX", "WS01")[..40]);
+        let properties = authorization("NTLM", &authenticate("jane", "PARTYX", "WS01")[..40]);
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
 
         let failure = Ntlm.identify(&arrival).expect_err("truncated");
