@@ -158,8 +158,7 @@ mod tests {
     use super::*;
     use ntlm::flags::NEGOTIATE_UNICODE;
     use ntlm::{Challenge, ClientChallenge};
-    use stream::Stream;
-    use xcore::{Established, Layer, StreamId};
+    use xcore::{Established, Layer};
 
     /// An AUTHENTICATE message with the three names and no NT response.
     fn authenticate(user: &str, domain: &str, workstation: &str) -> Vec<u8> {
@@ -198,10 +197,6 @@ mod tests {
         .to_bytes()
     }
 
-    fn stream() -> Stream {
-        Stream::new(StreamId::new(1), b"<order/>".to_vec(), None)
-    }
-
     fn authorization(scheme: &str, bytes: &[u8]) -> Vec<(String, String)> {
         vec![(
             HTTP_AUTHORIZATION.to_string(),
@@ -211,9 +206,8 @@ mod tests {
 
     #[test]
     fn a_type_3_is_presented_by_its_user_with_domain_and_workstation_beside() {
-        let stream = stream();
         let properties = authorization("NTLM", &authenticate("jane", "PARTYX", "WS01"));
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
 
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
 
@@ -238,24 +232,22 @@ mod tests {
 
     #[test]
     fn a_type_3_under_negotiate_reads_the_same_and_a_kerberos_token_does_not() {
-        let stream = stream();
         let properties = authorization("Negotiate", &authenticate("jane", "", ""));
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
 
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         assert_eq!(claim.value, "jane");
         assert!(claim.evidence.is_empty());
 
         let properties = authorization("Negotiate", &[0x60, 0x06, 0x06, 0x04, 0x2b, 0x06]);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
         assert!(Ntlm.identify(&arrival).expect("read").is_none());
     }
 
     #[test]
     fn the_user_within_the_domain_is_written_as_a_principal_name_in_canonical_form() {
-        let stream = stream();
         let properties = authorization("NTLM", &authenticate("Jane", "Party-X.Example", ""));
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
 
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
 
@@ -274,12 +266,9 @@ mod tests {
 
     #[test]
     fn a_user_without_a_domain_or_within_no_real_one_gains_no_principal_evidence() {
-        let stream = stream();
-
         for domain in ["", "not a domain"] {
             let properties = authorization("NTLM", &authenticate("jane", domain, "WS01"));
-            let arrival =
-                StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+            let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
 
             let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
 
@@ -297,7 +286,6 @@ mod tests {
     #[test]
     fn the_target_the_client_named_is_written_as_a_service_principal_name() {
         // MS-NLMP 2.2.2.1: MsvAvTargetName, among the pairs of the response.
-        let stream = stream();
         let bytes = authenticate_answering(
             "jane",
             "PARTYX",
@@ -305,7 +293,7 @@ mod tests {
             &answering(Some("HTTP/Xmip.Example"), false),
         );
         let properties = authorization("NTLM", &bytes);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
 
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         let said = |name: &str| {
@@ -325,7 +313,6 @@ mod tests {
 
     #[test]
     fn a_target_from_an_untrusted_source_is_written_and_not_as_a_principal_name() {
-        let stream = stream();
         let bytes = authenticate_answering(
             "jane",
             "PARTYX",
@@ -333,7 +320,7 @@ mod tests {
             &answering(Some("HTTP/xmip.example"), true),
         );
         let properties = authorization("NTLM", &bytes);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
 
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         let names: Vec<&str> = claim
@@ -349,10 +336,9 @@ mod tests {
 
     #[test]
     fn an_ntlmv1_response_names_no_target_and_one_outside_the_message_is_an_error() {
-        let stream = stream();
         let older = authenticate_answering("jane", "PARTYX", "WS01", &[0x5A; 24]);
         let properties = authorization("NTLM", &older);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         assert!(claim.evidence.iter().all(|(name, _)| name != TARGET));
 
@@ -361,16 +347,15 @@ mod tests {
         // The NtChallengeResponse's BufferOffset, at 24 ([MS-NLMP] 2.2.1.3).
         astray[24..28].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
         let properties = authorization("NTLM", &astray);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
         let failure = Ntlm.identify(&arrival).expect_err("astray");
         assert!(failure.message.contains("NtChallengeResponse"), "{failure}");
     }
 
     #[test]
     fn the_handshakes_first_two_legs_ride_on_as_proofs_where_the_transport_kept_them() {
-        let stream = stream();
         let mut properties = authorization("NTLM", &authenticate("jane", "PARTYX", "WS01"));
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         assert_eq!(claim.proof(property::NTLM_NEGOTIATE), None);
 
@@ -382,7 +367,7 @@ mod tests {
             property::NTLM_CHALLENGE.to_string(),
             " TlRMTVNTUAAC ".to_string(),
         ));
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
 
         assert_eq!(claim.proof(property::NTLM_NEGOTIATE), Some("TlRMTVNTUAAB"));
@@ -392,26 +377,23 @@ mod tests {
 
     #[test]
     fn a_type_1_claims_nothing_yet_and_another_scheme_is_not_this_mechanism() {
-        let stream = stream();
         let mut negotiate = SIGNATURE.to_vec();
         negotiate.extend_from_slice(&1u32.to_le_bytes());
         negotiate.extend_from_slice(&[0; 20]);
         let properties = authorization("NTLM", &negotiate);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
         assert!(Ntlm.identify(&arrival).expect("read").is_none());
 
         let properties = [(HTTP_AUTHORIZATION.to_string(), "Bearer abc".to_string())];
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
         assert!(Ntlm.identify(&arrival).expect("read").is_none());
     }
 
     #[test]
     fn a_type_2_is_the_servers_and_a_type_3_naming_no_user_claims_no_one() {
-        let stream = stream();
         let refused = |bytes: &[u8]| {
             let properties = authorization("NTLM", bytes);
-            let arrival =
-                StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+            let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
             Ntlm.identify(&arrival).expect_err("refused").message
         };
 
@@ -422,9 +404,8 @@ mod tests {
 
     #[test]
     fn a_truncated_type_3_is_an_error_naming_where_it_stopped() {
-        let stream = stream();
         let properties = authorization("NTLM", &authenticate("jane", "PARTYX", "WS01")[..40]);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
 
         let failure = Ntlm.identify(&arrival).expect_err("truncated");
 
@@ -433,9 +414,8 @@ mod tests {
 
     #[test]
     fn a_message_that_is_not_ntlmssp_is_an_error_naming_why() {
-        let stream = stream();
         let properties = authorization("NTLM", b"not an NTLM message at all");
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/in", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
 
         let failure = Ntlm.identify(&arrival).expect_err("no signature");
 
@@ -444,14 +424,8 @@ mod tests {
 
     #[test]
     fn a_scheduled_pickup_presents_nothing_because_the_credential_was_xmips_own() {
-        let stream = stream();
         let properties = authorization("NTLM", &authenticate("xmip", "", ""));
-        let arrival = StreamArrival::new(
-            &stream,
-            Arriving::Scheduled,
-            "https://share/out",
-            &properties,
-        );
+        let arrival = StreamArrival::new(Arriving::Scheduled, "https://share/out", &properties);
 
         assert!(Ntlm.identify(&arrival).expect("read").is_none());
     }

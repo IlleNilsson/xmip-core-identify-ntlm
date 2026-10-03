@@ -25,9 +25,6 @@ ntlm = { package = "xmip-core-library-ntlm", git = "https://github.com/IlleNilss
 # The estate's base 64 (RFC 4648), which the credential travels in.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 
-[dev-dependencies]
-# The Stream an arrival is built over, for the tests only.
-stream = { package = "xmip-core-stream", git = "https://github.com/IlleNilsson/xmip-core-stream", branch = "main" }
 
 [lints.rust]
 unsafe_code = "forbid"
