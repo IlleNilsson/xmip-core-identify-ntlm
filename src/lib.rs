@@ -237,7 +237,7 @@ mod tests {
 
         let claim = Ntlm.identify(&arrival).expect("read").expect("a claim");
         assert_eq!(claim.value, "jane");
-        assert!(claim.evidence.is_empty());
+        assert_eq!(claim.evidence, [] as [(String, String); 0]);
 
         let properties = authorization("Negotiate", &[0x60, 0x06, 0x06, 0x04, 0x2b, 0x06]);
         let arrival = StreamArrival::new(Arriving::Pushed, "https://x/in", &properties);
